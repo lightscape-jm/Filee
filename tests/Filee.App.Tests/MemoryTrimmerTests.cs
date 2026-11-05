@@ -2,6 +2,7 @@
 // a new reason.
 
 using Filee.App.Services;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Filee.App.Tests;
@@ -58,11 +59,30 @@ public class MemoryTrimmerTests
         filled.ForEach(block => Array.Fill(block, (byte)1));
         filled.Clear();
 
-        MemoryTrimmer.Trim(NullLogger.Instance);
+        var gen2Before = GC.CollectionCount(2);
+        var heapBefore = GC.GetTotalMemory(false);
+        var problems = new DiagLogger();
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        MemoryTrimmer.Trim(problems);
+        var trimMs = clock.ElapsedMilliseconds;
+        var any = GC.GetGCMemoryInfo();
+        var blocking = GC.GetGCMemoryInfo(GCKind.FullBlocking);
+        var diag = $"TRIMDIAG peak={peak} heapBefore={heapBefore} gen2Delta={GC.CollectionCount(2) - gen2Before} trimMs={trimMs}"
+            + $" any(idx={any.Index} gen={any.Generation} compacted={any.Compacted} concurrent={any.Concurrent} committed={any.TotalCommittedBytes} heap={any.HeapSizeBytes} frag={any.FragmentedBytes} pinned={any.PinnedObjectsCount} finalizing={any.FinalizationPendingCount})"
+            + $" blocking(idx={blocking.Index} compacted={blocking.Compacted} committed={blocking.TotalCommittedBytes} heap={blocking.HeapSizeBytes})"
+            + $" total={GC.GetTotalMemory(false)} limit={peak - 150L * 1024 * 1024} logged=[{string.Join(" ; ", problems.Lines)}]";
+        if (GC.GetGCMemoryInfo().TotalCommittedBytes >= peak - 150L * 1024 * 1024)
+        {
+            MemoryTrimmer.Trim(problems);
+            var again = GC.GetGCMemoryInfo();
+            diag += $" secondTrim(idx={again.Index} compacted={again.Compacted} committed={again.TotalCommittedBytes} heap={again.HeapSizeBytes}) logged2=[{string.Join(" ; ", problems.Lines)}]";
+        }
+        TestContext.Current.TestOutputHelper?.WriteLine(diag);
+        Console.WriteLine(diag);
 
         // Other tests may run meanwhile: most of the 300 MB is gone, not all of it.
         Assert.True(GC.GetGCMemoryInfo().TotalCommittedBytes < peak - 150L * 1024 * 1024,
-            $"{GC.GetGCMemoryInfo().TotalCommittedBytes} bytes stayed committed of {peak}");
+            $"{GC.GetGCMemoryInfo().TotalCommittedBytes} bytes stayed committed of {peak}; {diag}");
     }
 
     [Fact]
@@ -77,5 +97,17 @@ public class MemoryTrimmerTests
         Assert.Equal(0, trimmer.Trims); // a conversion finishing every 100 ms: still converting
         await Until(() => trimmer.Trims > 0);
         Assert.Equal(1, trimmer.Trims);
+    }
+
+    private sealed class DiagLogger : ILogger
+    {
+        public List<string> Lines { get; } = [];
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            lock (Lines)
+                Lines.Add($"{logLevel}: {formatter(state, exception)} {exception?.GetType().Name} {exception?.Message}");
+        }
     }
 }
