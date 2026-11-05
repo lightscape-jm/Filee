@@ -9,6 +9,8 @@ name: Linux and macOS packages
 # requirement again.
 
 on:
+  push:
+    branches: ['diag/**']
   workflow_call:
     inputs:
       version:
